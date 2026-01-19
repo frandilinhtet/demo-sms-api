@@ -2,8 +2,23 @@ require('dotenv').config();
 const express = require('express');
 const { PrismaClient } = require('@prisma/client');
 
+const dbUser = process.env.DB_USER;
+const dbPass = encodeURIComponent(process.env.DB_PASSWORD || '');
+const dbHost = process.env.DB_HOST;
+const dbPort = process.env.DB_PORT || '5432';
+const dbName = process.env.DB_NAME;
+
+const databaseUrl = `postgresql://${dbUser}:${dbPass}@${dbHost}:${dbPort}/${dbName}?sslmode=require`;
+
+const prisma = new PrismaClient({
+  datasources: {
+    db: {
+      url: databaseUrl,
+    },
+  },
+});
+
 const app = express();
-const prisma = new PrismaClient();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());

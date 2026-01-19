@@ -25,13 +25,13 @@ COPY package*.json ./
 RUN npm install
 
 # Copy Prisma schema and generated client
-COPY prisma ./prisma/
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/prisma ./prisma
 
 # Copy application
 COPY server.js ./
 
 EXPOSE 3000
 
-CMD npx prisma migrate deploy && node server.js
+CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]

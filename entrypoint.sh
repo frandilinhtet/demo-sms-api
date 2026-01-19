@@ -1,12 +1,13 @@
 #!/bin/sh
+set -e
 
-export DATABASE_URL="postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+echo "🏗️ Building encoded DATABASE_URL..."
+
+# Use Node to encode variables and export them to the shell
+export DATABASE_URL=$(node -e "console.log('postgresql://' + encodeURIComponent(process.env.DB_USER) + ':' + encodeURIComponent(process.env.DB_PASSWORD) + '@' + process.env.DB_HOST + ':' + (process.env.DB_PORT || 5432) + '/' + process.env.DB_NAME)")
 
 echo "🚀 Running database migrations..."
 npx prisma migrate deploy
 
 echo "✅ Starting server..."
-
-node migrate-helper.js
-
 exec node server.js

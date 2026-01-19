@@ -32,6 +32,10 @@ COPY --from=builder /app/prisma ./prisma
 # Copy application
 COPY server.js ./
 
+COPY docker-entrypoint.sh ./
+
+RUN chmod +x docker-entrypoint.sh
+
 EXPOSE 3000
 
-CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
+ENTRYPOINT ["./docker-entrypoint.sh"]

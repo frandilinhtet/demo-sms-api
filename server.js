@@ -1,450 +1,363 @@
-require('dotenv').config();
+/**
+ * server.js
+ * Clean production setup for:
+ * - AWS ECS Fargate
+ * - Prisma + PostgreSQL (RDS)
+ */
+
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config();
+}
+
 const express = require('express');
+const http = require('http');
 const { PrismaClient } = require('@prisma/client');
 
-const app = express();
-const prisma = new PrismaClient();
-const PORT = process.env.PORT || 3000;
+/**
+ * Validate required environment variables
+ */
+const requiredEnv = [
+  'DB_USER',
+  'DB_PASSWORD',
+  'DB_HOST',
+  'DB_NAME',
+];
 
+for (const key of requiredEnv) {
+  if (!process.env[key]) {
+    console.error(`❌ Missing environment variable: ${key}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Build database connection URL
+ */
+const dbUser = encodeURIComponent(process.env.DB_USER);
+const dbPass = encodeURIComponent(process.env.DB_PASSWORD);
+const dbHost = process.env.DB_HOST;
+const dbPort = process.env.DB_PORT || 5432;
+const dbName = process.env.DB_NAME;
+
+const databaseUrl = `postgresql://${dbUser}:${dbPass}@${dbHost}:${dbPort}/${dbName}`;
+
+/**
+ * Prisma client (lazy connection)
+ */
+const prisma = new PrismaClient({
+  datasources: {
+    db: { url: databaseUrl },
+  },
+});
+
+/**
+ * Express app
+ */
+const app = express();
 app.use(express.json());
 
-// ============ HEALTH CHECK ============
+app.get('/', (req, res) => {
+  res.json({ message: 'Backend API is running 🚀' });
+});
+
 app.get('/health', async (req, res) => {
   try {
-    await prisma.$queryRaw`SELECT 1`;
-    res.status(200).json({ 
-      status: 'OK', 
-      timestamp: new Date().toISOString(),
-      database: 'connected'
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      status: 'ERROR', 
-      timestamp: new Date().toISOString(),
-      database: 'disconnected'
-    });
+    await prisma.$queryRaw`SELECT 1`; // Simple ping to DB
+    res.status(200).send('OK');
+  } catch (err) {
+    res.status(503).send('Database connection error');
   }
 });
 
-// ============ STUDENTS ============
+/**
+ * Student Routes
+ */
+
+// GET all students
 app.get('/api/students', async (req, res) => {
   try {
-    const { grade, classId } = req.query;
-    const where = {};
-    if (grade) where.grade = grade;
-    if (classId) where.classId = parseInt(classId);
-    
-    const students = await prisma.student.findMany({ where, orderBy: { id: 'asc' } });
-    res.json({ success: true, data: students, count: students.length });
+    const students = await prisma.student.findMany({
+      include: { enrollments: true }
+    });
+    res.json(students);
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(500).json({ error: 'Failed to fetch students' });
   }
 });
 
+// GET single student by ID
 app.get('/api/students/:id', async (req, res) => {
   try {
+    const { id } = req.params;
     const student = await prisma.student.findUnique({
-      where: { id: parseInt(req.params.id) },
+      where: { id: parseInt(id) },
       include: { enrollments: { include: { class: true } } }
     });
-    if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
-    res.json({ success: true, data: student });
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+    res.json(student);
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(500).json({ error: 'Error fetching student' });
   }
 });
 
 app.post('/api/students', async (req, res) => {
   try {
-    const { firstName, lastName, email, grade, classId } = req.body;
-    if (!firstName || !lastName || !email || !grade) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
-    }
-    const student = await prisma.student.create({
-      data: { firstName, lastName, email, grade, classId: classId || null }
+    const { firstName, lastName, email, grade, enrollmentDate } = req.body;
+    const newStudent = await prisma.student.create({
+      data: { 
+        firstName, 
+        lastName, 
+        email, 
+        grade, 
+        enrollmentDate: new Date(enrollmentDate) 
+      },
     });
-    res.status(201).json({ success: true, data: student });
+    res.status(201).json(newStudent);
   } catch (error) {
-    if (error.code === 'P2002') {
-      res.status(400).json({ success: false, message: 'Email already exists' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
+    res.status(400).json({ error: 'Failed to create student', details: error.message });
   }
 });
 
+// PUT: Update an existing student (Requires an ID)
 app.put('/api/students/:id', async (req, res) => {
   try {
-    const { firstName, lastName, email, grade, classId } = req.body;
-    const student = await prisma.student.update({
-      where: { id: parseInt(req.params.id) },
-      data: {
-        ...(firstName && { firstName }),
-        ...(lastName && { lastName }),
-        ...(email && { email }),
-        ...(grade && { grade }),
-        ...(classId !== undefined && { classId })
-      }
+    const { id } = req.params;
+    const updatedStudent = await prisma.student.update({
+      where: { id: parseInt(id) },
+      data: req.body,
     });
-    res.json({ success: true, data: student });
+    res.json(updatedStudent);
   } catch (error) {
-    if (error.code === 'P2025') {
-      res.status(404).json({ success: false, message: 'Student not found' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
+    res.status(400).json({ error: 'Update failed' });
   }
 });
 
+// DELETE: Remove a student
 app.delete('/api/students/:id', async (req, res) => {
   try {
-    const student = await prisma.student.delete({ where: { id: parseInt(req.params.id) } });
-    res.json({ success: true, message: 'Student deleted', data: student });
+    const { id } = req.params;
+    await prisma.student.delete({
+      where: { id: parseInt(id) },
+    });
+    res.status(204).send();
   } catch (error) {
-    if (error.code === 'P2025') {
-      res.status(404).json({ success: false, message: 'Student not found' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
+    res.status(400).json({ error: 'Delete failed' });
   }
 });
 
-// ============ TEACHERS ============
+/**
+ * Teacher Routes
+ */
+
 app.get('/api/teachers', async (req, res) => {
   try {
-    const { subject } = req.query;
-    const where = subject ? { subject: { contains: subject, mode: 'insensitive' } } : {};
-    const teachers = await prisma.teacher.findMany({ where, orderBy: { id: 'asc' } });
-    res.json({ success: true, data: teachers, count: teachers.length });
+    const teachers = await prisma.teacher.findMany({
+      include: { classes: true }
+    });
+    res.json(teachers);
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(500).json({ error: 'Failed to fetch teachers' });
   }
 });
 
 app.get('/api/teachers/:id', async (req, res) => {
   try {
+    const { id } = req.params;
     const teacher = await prisma.teacher.findUnique({
-      where: { id: parseInt(req.params.id) },
+      where: { id: parseInt(id) },
       include: { classes: true }
     });
-    if (!teacher) return res.status(404).json({ success: false, message: 'Teacher not found' });
-    res.json({ success: true, data: teacher });
+    if (!teacher) return res.status(404).json({ error: 'Teacher not found' });
+    res.json(teacher);
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(500).json({ error: 'Error fetching teacher' });
   }
 });
 
 app.post('/api/teachers', async (req, res) => {
   try {
     const { firstName, lastName, email, subject, phone } = req.body;
-    if (!firstName || !lastName || !email || !subject) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
-    }
-    const teacher = await prisma.teacher.create({
-      data: { firstName, lastName, email, subject, phone }
+    const newTeacher = await prisma.teacher.create({
+      data: {
+        firstName,
+        lastName,
+        email,
+        subject,
+        phone
+      },
     });
-    res.status(201).json({ success: true, data: teacher });
+    res.status(201).json(newTeacher);
   } catch (error) {
-    if (error.code === 'P2002') {
-      res.status(400).json({ success: false, message: 'Email already exists' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
+    res.status(400).json({ error: 'Failed to create teacher', details: error.message });
   }
 });
 
 app.put('/api/teachers/:id', async (req, res) => {
   try {
-    const { firstName, lastName, email, subject, phone } = req.body;
-    const teacher = await prisma.teacher.update({
-      where: { id: parseInt(req.params.id) },
-      data: {
-        ...(firstName && { firstName }),
-        ...(lastName && { lastName }),
-        ...(email && { email }),
-        ...(subject && { subject }),
-        ...(phone !== undefined && { phone })
-      }
+    const { id } = req.params;
+    const updatedTeacher = await prisma.teacher.update({
+      where: { id: parseInt(id) },
+      data: req.body,
     });
-    res.json({ success: true, data: teacher });
+    res.json(updatedTeacher);
   } catch (error) {
-    if (error.code === 'P2025') {
-      res.status(404).json({ success: false, message: 'Teacher not found' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
+    res.status(400).json({ error: 'Update failed. Check if the ID exists.' });
   }
 });
 
 app.delete('/api/teachers/:id', async (req, res) => {
   try {
-    const teacher = await prisma.teacher.delete({ where: { id: parseInt(req.params.id) } });
-    res.json({ success: true, message: 'Teacher deleted', data: teacher });
-  } catch (error) {
-    if (error.code === 'P2025') {
-      res.status(404).json({ success: false, message: 'Teacher not found' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
-  }
-});
-
-// ============ CLASSES ============
-app.get('/api/classes', async (req, res) => {
-  try {
-    const { teacherId } = req.query;
-    const where = teacherId ? { teacherId: parseInt(teacherId) } : {};
-    const classes = await prisma.class.findMany({
-      where,
-      include: { teacher: true, _count: { select: { enrollments: true } } },
-      orderBy: { id: 'asc' }
+    const { id } = req.params;
+    await prisma.teacher.delete({
+      where: { id: parseInt(id) },
     });
-    res.json({ success: true, data: classes, count: classes.length });
+    res.status(204).send(); // Success, no content
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(400).json({ error: 'Delete failed. Teacher might not exist or has active classes.' });
   }
 });
 
-app.get('/api/classes/:id', async (req, res) => {
-  try {
-    const classData = await prisma.class.findUnique({
-      where: { id: parseInt(req.params.id) },
-      include: { teacher: true, enrollments: { include: { student: true } } }
-    });
-    if (!classData) return res.status(404).json({ success: false, message: 'Class not found' });
-    res.json({ success: true, data: classData });
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
-  }
-});
+/**
+ * Course Routes
+ */
 
-app.post('/api/classes', async (req, res) => {
-  try {
-    const { name, teacherId, room, schedule, capacity } = req.body;
-    if (!name || !teacherId || !room) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
-    }
-    const classData = await prisma.class.create({
-      data: { name, teacherId, room, schedule, capacity: capacity || 30 }
-    });
-    res.status(201).json({ success: true, data: classData });
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
-  }
-});
-
-app.put('/api/classes/:id', async (req, res) => {
-  try {
-    const { name, teacherId, room, schedule, capacity } = req.body;
-    const classData = await prisma.class.update({
-      where: { id: parseInt(req.params.id) },
-      data: {
-        ...(name && { name }),
-        ...(teacherId && { teacherId }),
-        ...(room && { room }),
-        ...(schedule !== undefined && { schedule }),
-        ...(capacity && { capacity })
-      }
-    });
-    res.json({ success: true, data: classData });
-  } catch (error) {
-    if (error.code === 'P2025') {
-      res.status(404).json({ success: false, message: 'Class not found' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
-  }
-});
-
-app.delete('/api/classes/:id', async (req, res) => {
-  try {
-    const classData = await prisma.class.delete({ where: { id: parseInt(req.params.id) } });
-    res.json({ success: true, message: 'Class deleted', data: classData });
-  } catch (error) {
-    if (error.code === 'P2025') {
-      res.status(404).json({ success: false, message: 'Class not found' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
-  }
-});
-
-// ============ COURSES ============
+// GET all courses
 app.get('/api/courses', async (req, res) => {
   try {
-    const courses = await prisma.course.findMany({ orderBy: { id: 'asc' } });
-    res.json({ success: true, data: courses, count: courses.length });
+    const courses = await prisma.course.findMany({
+      include: { 
+        teacher: true, // Show teacher details
+        enrollments: { include: { student: true } } // Show enrolled students
+      }
+    });
+    res.json(courses);
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(500).json({ error: 'Failed to fetch courses' });
   }
 });
 
-app.get('/api/courses/:id', async (req, res) => {
-  try {
-    const course = await prisma.course.findUnique({ where: { id: parseInt(req.params.id) } });
-    if (!course) return res.status(404).json({ success: false, message: 'Course not found' });
-    res.json({ success: true, data: course });
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
-  }
-});
-
+// POST: Create a new course
 app.post('/api/courses', async (req, res) => {
   try {
-    const { name, code, credits, description } = req.body;
-    if (!name || !code || !credits) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
-    }
-    const course = await prisma.course.create({ data: { name, code, credits, description } });
-    res.status(201).json({ success: true, data: course });
+    const { name, code, description, teacherId } = req.body;
+    const newCourse = await prisma.course.create({
+      data: { 
+        name, 
+        code, 
+        description,
+        teacherId: teacherId ? parseInt(teacherId) : null 
+      },
+    });
+    res.status(201).json(newCourse);
   } catch (error) {
-    if (error.code === 'P2002') {
-      res.status(400).json({ success: false, message: 'Course code already exists' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
+    res.status(400).json({ error: 'Failed to create course', details: error.message });
   }
 });
 
+// PUT: Update course info
 app.put('/api/courses/:id', async (req, res) => {
   try {
-    const { name, code, credits, description } = req.body;
-    const course = await prisma.course.update({
-      where: { id: parseInt(req.params.id) },
-      data: {
-        ...(name && { name }),
-        ...(code && { code }),
-        ...(credits && { credits }),
-        ...(description !== undefined && { description })
-      }
+    const { id } = req.params;
+    const updatedCourse = await prisma.course.update({
+      where: { id: parseInt(id) },
+      data: req.body,
     });
-    res.json({ success: true, data: course });
+    res.json(updatedCourse);
   } catch (error) {
-    if (error.code === 'P2025') {
-      res.status(404).json({ success: false, message: 'Course not found' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
+    res.status(400).json({ error: 'Update failed' });
   }
 });
 
+// DELETE: Remove a course
 app.delete('/api/courses/:id', async (req, res) => {
   try {
-    const course = await prisma.course.delete({ where: { id: parseInt(req.params.id) } });
-    res.json({ success: true, message: 'Course deleted', data: course });
-  } catch (error) {
-    if (error.code === 'P2025') {
-      res.status(404).json({ success: false, message: 'Course not found' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
-  }
-});
-
-// ============ ENROLLMENTS ============
-app.get('/api/enrollments', async (req, res) => {
-  try {
-    const { studentId, classId, status } = req.query;
-    const where = {};
-    if (studentId) where.studentId = parseInt(studentId);
-    if (classId) where.classId = parseInt(classId);
-    if (status) where.status = status;
-    
-    const enrollments = await prisma.enrollment.findMany({
-      where,
-      include: { student: true, class: true },
-      orderBy: { id: 'asc' }
+    const { id } = req.params;
+    await prisma.course.delete({
+      where: { id: parseInt(id) },
     });
-    res.json({ success: true, data: enrollments, count: enrollments.length });
+    res.status(204).send();
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(400).json({ error: 'Delete failed' });
   }
 });
 
+/**
+ * Enrollment Routes (The Bridge)
+ */
+
+// POST: Enroll a student in a course
 app.post('/api/enrollments', async (req, res) => {
   try {
-    const { studentId, classId, status } = req.body;
-    if (!studentId || !classId) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
-    }
+    const { studentId, courseId } = req.body;
     const enrollment = await prisma.enrollment.create({
-      data: { studentId, classId, status: status || 'active' }
-    });
-    res.status(201).json({ success: true, data: enrollment });
-  } catch (error) {
-    if (error.code === 'P2002') {
-      res.status(400).json({ success: false, message: 'Enrollment already exists' });
-    } else if (error.code === 'P2003') {
-      res.status(404).json({ success: false, message: 'Student or Class not found' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
-  }
-});
-
-app.delete('/api/enrollments/:id', async (req, res) => {
-  try {
-    const enrollment = await prisma.enrollment.delete({ where: { id: parseInt(req.params.id) } });
-    res.json({ success: true, message: 'Enrollment deleted', data: enrollment });
-  } catch (error) {
-    if (error.code === 'P2025') {
-      res.status(404).json({ success: false, message: 'Enrollment not found' });
-    } else {
-      res.status(500).json({ success: false, message: 'Database error', error: error.message });
-    }
-  }
-});
-
-// ============ STATISTICS ============
-app.get('/api/stats', async (req, res) => {
-  try {
-    const [students, teachers, classes, courses, enrollments, activeEnrollments] = await Promise.all([
-      prisma.student.count(),
-      prisma.teacher.count(),
-      prisma.class.count(),
-      prisma.course.count(),
-      prisma.enrollment.count(),
-      prisma.enrollment.count({ where: { status: 'active' } })
-    ]);
-    res.json({
-      success: true,
       data: {
-        total_students: students,
-        total_teachers: teachers,
-        total_classes: classes,
-        total_courses: courses,
-        total_enrollments: enrollments,
-        active_enrollments: activeEnrollments
+        studentId: parseInt(studentId),
+        courseId: parseInt(courseId),
+        enrollmentDate: new Date()
+      },
+    });
+    res.status(201).json(enrollment);
+  } catch (error) {
+    res.status(400).json({ error: 'Enrollment failed. Ensure IDs are valid.' });
+  }
+});
+
+// GET all enrollments (Audit log)
+app.get('/api/enrollments', async (req, res) => {
+  try {
+    const enrollments = await prisma.enrollment.findMany({
+      include: {
+        student: true,
+        course: true
       }
     });
+    res.json(enrollments);
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(500).json({ error: 'Failed to fetch enrollments' });
   }
 });
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: 'Endpoint not found' });
+// DELETE: Unenroll a student
+app.delete('/api/enrollments/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await prisma.enrollment.delete({
+      where: { id: parseInt(id) },
+    });
+    res.status(204).send();
+  } catch (error) {
+    res.status(400).json({ error: 'Unenrollment failed' });
+  }
 });
 
-// Error handler
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ success: false, message: 'Internal server error' });
+/**
+ * HTTP server
+ */
+const PORT = process.env.PORT || 3000;
+const server = http.createServer(app);
+
+server.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📍 Health check: http://localhost:${PORT}/health`);
-});
+/**
+ * Graceful shutdown (ECS rolling deployments)
+ */
+const shutdown = async (signal) => {
+  console.log(`🛑 Received ${signal}. Shutting down...`);
+  try {
+    await prisma.$disconnect();
+    server.close(() => {
+      console.log('✅ Server closed');
+      process.exit(0);
+    });
+  } catch (err) {
+    console.error('❌ Shutdown error:', err);
+    process.exit(1);
+  }
+};
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM received, shutting down gracefully...');
-  await prisma.$disconnect();
-  server.close(() => {
-    console.log('Process terminated');
-  });
-});
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
 module.exports = { app, server, prisma };
